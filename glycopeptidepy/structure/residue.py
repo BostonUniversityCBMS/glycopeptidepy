@@ -2,6 +2,7 @@ from . import ResidueBase
 from .composition import Composition
 from ..utils.memoize import memoize
 from glypy.utils.multimap import MultiMap
+from six import add_metaclass
 
 symbol_to_residue = {
     'A': 'Ala',
@@ -149,6 +150,7 @@ class MemoizedResidueMetaclass(type):
                     "Cannot find a AminoAcidResidue for %r" % ((symbol, name),))
 
 
+@add_metaclass(MemoizedResidueMetaclass)
 class AminoAcidResidue(ResidueBase):
     '''
     Represent a single Amino Acid residue which compose peptide sequences. The
@@ -172,8 +174,6 @@ class AminoAcidResidue(ResidueBase):
 
     '''
     __slots__ = ["name", "symbol", "mass", "composition", "neutral_loss"]
-
-    __metaclass__ = MemoizedResidueMetaclass
 
     @staticmethod
     @memoize()
@@ -247,14 +247,15 @@ class AminoAcidResidue(ResidueBase):
             return self.name != other and self.symbol != other
 
     def __getstate__(self):
-        return [self.name, self.symbol, self.mass, self.neutral_loss]
+        return [self.name, self.symbol, self.mass, self.composition, self.neutral_loss]
 
     def __setstate__(self, state):
         self.name = state[0]
         self.symbol = state[1]
         self.mass = state[2]
-        if len(state) > 3:
-            self.neutral_loss = state[3]
+        self.composition = state[3]
+        if len(state) > 4:
+            self.neutral_loss = state[4]
 
     @property
     def chemical_class(self):

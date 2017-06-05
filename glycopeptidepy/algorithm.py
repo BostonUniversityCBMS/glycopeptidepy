@@ -21,8 +21,8 @@ def pair_rotate(sequence):
     while True:
         chunk = []
         try:
-            chunk = [gen.next()]
-            chunk.append(gen.next())
+            chunk = [next(gen)]
+            chunk.append(next(gen))
             chunks.append(chunk)
         except StopIteration:
             if len(chunk) > 0:
@@ -32,6 +32,22 @@ def pair_rotate(sequence):
     for chunk in reversed(chunks):
         rev_seq.extend(chunk)
     return rev_seq
+
+
+def edit_distance(s1, s2):
+    if len(s1) > len(s2):
+        s1, s2 = s2, s1
+
+    distances = range(len(s1) + 1)
+    for i2, c2 in enumerate(s2):
+        distances_ = [i2 + 1]
+        for i1, c1 in enumerate(s1):
+            if c1 == c2:
+                distances_.append(distances[i1])
+            else:
+                distances_.append(1 + min((distances[i1], distances[i1 + 1], distances_[-1])))
+        distances = distances_
+    return distances[-1]
 
 
 def reverse_preserve_sequon(sequence, prefix_len=0, suffix_len=1, peptide_type=None):
@@ -55,5 +71,6 @@ def reverse_preserve_sequon(sequence, prefix_len=0, suffix_len=1, peptide_type=N
         rev_sequence = (list_to_sequence(pref + list(rot_body) + suf))
     rev_sequence.n_term = original.n_term
     rev_sequence.c_term = original.c_term
-    rev_sequence.glycan = original.glycan.clone(propogate_composition_offset=False)
+    if original.glycan:
+        rev_sequence.glycan = original.glycan.clone(propogate_composition_offset=False)
     return rev_sequence

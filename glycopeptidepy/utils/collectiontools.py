@@ -3,7 +3,7 @@ import itertools
 
 try:
     range = xrange
-except Exception, e:
+except Exception:
     pass
 
 
@@ -32,3 +32,33 @@ class decoratordict(dict):
             self[key] = f
             return f
         return wrapper
+
+
+class _AccumulatorBag(object):
+    def __init__(self, source=None):
+        self.store = defaultdict(int)
+        if source is not None:
+            self.store.update(source)
+
+    def __getitem__(self, i):
+        return self.store[i]
+
+    def __setitem__(self, i, v):
+        self.store[i] = v
+
+    def __add__(self, other):
+        new = _AccumulatorBag(self)
+        for key, value in other.items():
+            new[key] += value
+        return new
+
+    def __iadd__(self, other):
+        for key, value in other.items():
+            self[key] += value
+        return self
+
+    def items(self):
+        return self.store.items()
+
+    def __repr__(self):
+        return "_AccumulatorBag(%r)" % dict(self.store)

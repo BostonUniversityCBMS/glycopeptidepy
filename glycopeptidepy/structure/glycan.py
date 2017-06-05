@@ -6,6 +6,7 @@ from .modification import AnonymousModificationRule
 import glypy
 from glypy.structure.glycan import NamedGlycan
 from glypy import Composition
+from glypy.composition.glycan_composition import HashableGlycanComposition
 
 
 class allset(object):
@@ -41,25 +42,20 @@ glycosylation_site_detectors = decoratordict({
 })
 
 
-class TypedGlycanComposition(glypy.GlycanComposition):
+class TypedGlycanComposition(HashableGlycanComposition):
 
     def __init__(self, glycosylation_type, *args, **kwargs):
         self.glycosylation_type = GlycosylationType[glycosylation_type]
         super(TypedGlycanComposition).__init__(self, *args, **kwargs)
 
     def as_modification(self):
-        return AnonymousModificationRule("Glycan[{0}]".format(';'.join(self.serialize(), self.mass)))()
+        return AnonymousModificationRule("Glycan[{0}]".format(';'.join(
+            self.serialize(),
+            self.mass,
+            self.glycosylation_type.name)))()
 
     def is_type(self, glycosylation_type):
         return self.glycosylation_type is GlycosylationType[glycosylation_type]
-
-
-class HashableGlycanComposition(glypy.glycan_composition.FrozenGlycanComposition):
-    def __hash__(self):
-        return hash(str(self))
-
-    def __eq__(self, other):
-        return str(self) == str(other)
 
 
 class GlycanCompositionProxy(object):

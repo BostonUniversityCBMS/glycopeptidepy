@@ -42,7 +42,7 @@ class Protease(object):
             self.regex = re.compile(name)
 
     def __repr__(self):
-        return "Protease(%s, %s)" % (self.name, self.regex)
+        return "Protease(%s, %s)" % (self.name, self.regex.pattern)
 
     def missed_cleavages(self, sequence):
         if isinstance(sequence, PeptideSequence):
@@ -63,6 +63,14 @@ class Protease(object):
                         peptides.append((seq, cleavage_sites[j], cleavage_sites[-1] if cleavage_sites[-1]
                                          is not None else sequence_length(sequence)))
         return sorted(set(peptides), key=_get1)
+
+    @classmethod
+    def combine(cls, *names):
+        patterns = merge_enzyme_rules(names)
+        name = ' + '.join(names)
+        instance = cls(patterns)
+        instance.name = name
+        return instance
 
 
 expasy_rules = {'arg-c': 'R',
