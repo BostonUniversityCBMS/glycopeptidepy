@@ -1,1 +1,9 @@
 *.pyc
+explore/
+dist/
+build/
+*egg-info
+htmlcov/
+.coverage
+*sublime*
+/.cache

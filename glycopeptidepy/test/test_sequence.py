@@ -15,6 +15,16 @@ p3 = "NEEYN(N-Glycosylation)K{Hex:5; HexNAc:4; NeuAc:2}"
 p4 = "TVDGT(O-Glycosylation)AR{Fuc:1; Hex:1; HexNAc:1; Neu5Ac:1}"
 p5 = "(Carbamidomethyl)-FFYFTPNK"
 p6 = "NEEYN(N-Glycosylation)K{Fuc:1; Hex:5; HexNAc:4; NeuAc:2}"
+p7 = 'ISASGVEDIS(GAG-Linker)R{Xyl:1; a,enHex:1; aHex:1; Hex:1; HexS:1; HexNAc(S):1}'
+p8 = ('QQQHLFGSN(#:iupac,glycosylation_type=n_linked:b-D-Galp-(1-4)-b-D-Glcp2NAc-(1-2)'
+      '-a-D-Manp-(1-6)-[b-D-Galp-(1-4)-b-D-Glcp2NAc-(1-4)-a-D-Manp-(1-3)]b-D-Manp-(1-4)'
+      '-b-D-Glcp2NAc-(1-4)-?-D-Glcp2NAc)VTDC(Carbamidomethyl)SGNFCLFR')
+p9 = "N(N-Glycosylation)ITEIVYLTN(N-Glycosylation)TTIEK{Hex:10; HexNAc:8}"
+p10 = ('N(#:iupac,glycosylation_type=n_linked:b-D-Galp-(1-4)-b-D-Glcp2NAc-(1-2)-a-D-Manp'
+       '-(1-6)-[b-D-Galp-(1-4)-b-D-Glcp2NAc-(1-4)-a-D-Manp-(1-3)]b-D-Manp-(1-4)-b-D-Glcp2NAc'
+       '-(1-4)-?-D-Glcp2NAc)ITEIVYLTN(#:iupac,glycosylation_type=n_linked:b-D-Galp-(1-4)'
+       '-b-D-Glcp2NAc-(1-2)-a-D-Manp-(1-6)-[b-D-Galp-(1-4)-b-D-Glcp2NAc-(1-4)-a-D-Manp-(1-3)]'
+       'b-D-Manp-(1-4)-b-D-Glcp2NAc-(1-4)-?-D-Glcp2NAc)TTIEK')
 hexnac_mass = MonosaccharideResidue.from_iupac_lite("HexNAc").mass()
 hexose_mass = MonosaccharideResidue.from_iupac_lite("Hex").mass()
 
@@ -79,6 +89,11 @@ class PeptideSequenceSuiteBase(object):
         self.assertEqual(peptide.total_mass, peptide.clone().total_mass)
         self.assertEqual(peptide.total_composition(), peptide.clone().total_composition())
         self.assertTrue(peptide.full_structure_equality(peptide.clone()))
+        peptide = self.parse_sequence(p8)
+        self.assertEqual(peptide, peptide.clone())
+        self.assertEqual(peptide.total_mass, peptide.clone().total_mass)
+        self.assertEqual(peptide.total_composition(), peptide.clone().total_composition())
+        self.assertTrue(peptide.full_structure_equality(peptide.clone()))
 
     def test_add_remove_modification(self):
         p = self.parse_sequence("ENGTISR")
@@ -120,6 +135,11 @@ class PeptideSequenceSuiteBase(object):
         for i, stub in enumerate(self.parse_sequence(p4).stub_fragments()):
             self.assertAlmostEqual(masses[i], stub.mass, 3)
 
+    def test_sequon_finding(self):
+        seq = self.parse_sequence("PEPTIDES")
+        self.assertIn(3, seq.o_glycan_sequon_sites)
+        self.assertNotIn(3, seq.glycosaminoglycan_sequon_sites)
+
     def test_composition(self):
         for p in [p1, p2, p3, p4, p5]:
             seq = self.parse_sequence(p)
@@ -150,6 +170,36 @@ class PeptideSequenceSuiteBase(object):
                 had_fucose = True
         self.assertTrue(had_fucose)
 
+    def test_multiply_glycosylated_stubs(self):
+        seq = self.parse_sequence("N(N-Glycosylation)ITEIVYLTN(N-Glycosylation)TTIEK{Hex:14; HexNAc:4}")
+        stubs = list(seq.stub_fragments(extended=True))
+        name_set = {f.name for f in stubs}
+        self.assertTrue("peptide+Hex4HexNAc2" in name_set)
+
+    def test_gag_linker_peptide(self):
+        seq = self.parse_sequence(p7)
+        self.assertAlmostEqual(seq.total_mass, 2285.766, 2)
+        ox_map = {f.name: f for f in seq.glycan_fragments()}
+        self.assertAlmostEqual(ox_map["HexNAca,enHex"].mass, 361.10089, 3)
+
+    def test_glycan_representations(self):
+        t1 = self.parse_sequence(p9)
+        t2 = self.parse_sequence(p10)
+        self.assertAlmostEqual(t1.total_mass, t2.total_mass, 4)
+        self.assertEqual(t1.clone().deglycosylate(), t2.clone().deglycosylate())
+
+    def test_glycan_tracking(self):
+        t1 = self.parse_sequence("PEPT(HexNAc)IDE")
+        t2 = self.parse_sequence("PEPT(N-Glycosylation)IDE{HexNAc:1}")
+        self.assertAlmostEqual(t1.total_mass, t2.total_mass, 3)
+        self.assertNotAlmostEqual(t1.peptide_composition().mass, t2.peptide_composition().mass, 3)
+
+    def test_equalities(self):
+        t1 = self.parse_sequence("PEPT(HexNAc)IDE")
+        t2 = self.parse_sequence("PEPT(N-Glycosylation)IDE{HexNAc:1}")
+        self.assertTrue(t1.base_sequence_equality(t2))
+        self.assertFalse(t1.modified_sequence_equality(t2))
+
 
 class TestPeptideSequence(PeptideSequenceSuiteBase, unittest.TestCase):
     def parse_sequence(self, seqstr):
@@ -159,6 +209,11 @@ class TestPeptideSequence(PeptideSequenceSuiteBase, unittest.TestCase):
 class TestNamedSequence(PeptideSequenceSuiteBase, unittest.TestCase):
     def parse_sequence(self, seqstr):
         return sequence.NamedSequence("spam", seqstr)
+
+
+class TestAnnotatedSequence(PeptideSequenceSuiteBase, unittest.TestCase):
+    def parse_sequence(self, seqstr):
+        return sequence.AnnotatedSequence("spam", seqstr, annotations={"color": "green"})
 
 
 if __name__ == '__main__':

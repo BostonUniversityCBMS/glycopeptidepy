@@ -1,25 +1,36 @@
 import csv
 import json
+import string
 from copy import deepcopy
 import re
 from pkg_resources import resource_stream
-
+from functools import partial
 from six import string_types as basestring
 from io import StringIO
 
 from collections import defaultdict
 from collections import Iterable
+
 from glypy.composition.glycan_composition import (
     FrozenMonosaccharideResidue, FrozenGlycanComposition)
+
 from glypy.utils import Enum
+from glypy.io import glycoct, iupac, linear_code
+from glypy import Substituent, Glycan
 
 from .residue import Residue
 from .composition import Composition
+from .glycan import TypedGlycan, TypedGlycanComposition, GlycosylationType
 from . import ModificationBase
 
 
 target_string_pattern = re.compile(
-    r'(?P<amino_acid>[A-Z]+)?([@ ]?(?P<n_term>[Nn][-_][tT]erm)|(?P<c_term>[Cc][-_][tT]erm))?')
+    r'''(?P<amino_acid>[A-Z]+)?
+        (@
+            (?P<n_term>[Nn][-_][tT]erm)|
+            (?P<c_term>[Cc][-_][tT]erm)
+        )?''',
+    re.VERBOSE)
 title_cleaner = re.compile(
     r'(?P<name>.*)\s\((?P<target>.+)\)$')
 
@@ -117,36 +128,74 @@ def composition_delta_parser(formula):
 
 
 def extract_targets_from_string(target_string):
-    '''Parses the Protein Prospector modification name string to
-    extract the modification target specificity
-
-    Format:
-
-    `"Modification Name (Residues Targeted)"`
-
-    Parameters
-    ----------
-    target_string: str
-
-    Return
-    ------
-    :class:`ModificationTarget`
-
-    '''
     position_only = re.search(r"^([NnCc][-_][tT]erm)", target_string)
     if position_only:
         return ModificationTarget(None, SequenceLocation[position_only.groups()[0]])
     else:
-        amino_acid_and_position = re.search(
-            r'(?P<amino_acid>[A-Z]+)([@ ]?(?P<n_term>[Nn][-_][tT]erm)|(?P<c_term>[Cc][-_][tT]erm))?', target_string)
-        params = amino_acid_and_position.groupdict()
-        aa = list(map(Residue, params["amino_acid"]))
-        if params['n_term']:
-            return ModificationTarget(aa, SequenceLocation.n_term)
-        elif params['c_term']:
-            return ModificationTarget(aa, SequenceLocation.c_term)
+        state = 'aa'
+        amino_acids = []
+        position = []
+
+        i = 0
+        n = len(target_string)
+        while i < n:
+            c = target_string[i]
+
+            if c == " ":
+                if state == 'aa':
+                    state = "aa-space"
+                elif state == 'position-begin':
+                    pass
+                else:
+                    raise ValueError(target_string)
+            elif c == "@":
+                if state == 'aa':
+                    state = 'position-begin'
+                elif state == 'aa-space':
+                    state = 'position-begin'
+                else:
+                    raise ValueError("Found @ not between amino acids and position")
+            elif c in string.ascii_uppercase:
+                if state == 'aa':
+                    amino_acids.append(c)
+                elif state == 'position-begin':
+                    if c in "NC":
+                        position.append(c)
+                        state = 'position'
+                elif state == 'position':
+                    if c == 'T':
+                        position.append(c)
+                    else:
+                        raise ValueError("Invalid position specification")
+            elif c in string.ascii_lowercase:
+                if state == 'aa':
+                    amino_acids.append(c.upper())
+                elif state == 'position-begin':
+                    if c in 'nc':
+                        position.append(c)
+                        state = 'position'
+                elif state == 'position':
+                    position.append(c)
+            elif c in '-_':
+                if state == 'position':
+                    position.append(c)
+                else:
+                    raise ValueError("Found - not in position specification")
+            i += 1
+
+        position = ''.join(position)
+        position = position.lower().replace("-", "_").strip()
+
+        amino_acids = list(map(Residue, amino_acids))
+        if position == "":
+            position = SequenceLocation.anywhere
+        elif position == "n_term":
+            position = SequenceLocation.n_term
+        elif position == "c_term":
+            position = SequenceLocation.c_term
         else:
-            return ModificationTarget(aa, SequenceLocation.anywhere)
+            raise ValueError("Unrecognized position specification {}".format(position))
+        return ModificationTarget(amino_acids, position)
 
 
 def get_position_modifier_rules_dict(sequence):
@@ -437,6 +486,7 @@ class ModificationRule(object):
         for target in self.targets:
             self.categories.update(
                 target.classification)
+        self.categories = list(self.categories)
 
     @property
     def is_standard(self):
@@ -578,6 +628,14 @@ class ModificationRule(object):
     def as_spec_strings(self):
         for target in self.targets:
             yield "%s (%s)" % (self.title, target.serialize())
+
+    @property
+    def is_core(self):
+        return True
+
+    def is_tracked_for(self, category):
+        return False
+
 
 
 class AnonymousModificationRule(ModificationRule):
@@ -742,6 +800,21 @@ xylose_modification = ModificationRule.from_unimod({
 })
 
 
+glycan_resolvers = dict()
+glycan_resolvers['glycoct'] = partial(glycoct.loads, structure_class=TypedGlycan)
+glycan_resolvers['iupac'] = partial(iupac.loads, structure_class=TypedGlycan)
+glycan_resolvers['linear_code'] = partial(linear_code.loads, structure_class=TypedGlycan)
+glycan_resolvers['iupaclite'] = TypedGlycanComposition.parse
+
+
+def parse_glycan(glycan_format, encoded_string):
+    try:
+        parser = glycan_resolvers[glycan_format]
+        return parser(encoded_string)
+    except KeyError:
+        raise KeyError("Could not resolve glycan parser for %r (%r)" % (glycan_format, encoded_string))
+
+
 class Glycosylation(ModificationRule):
     """
     Incubator Idea - Represent occupied glycosylation sites
@@ -766,42 +839,151 @@ class Glycosylation(ModificationRule):
     title : TYPE
         Description
     """
-    parser = re.compile(r"@(?P<glycan_composition>\{[^\}]+\})")
+
+    @classmethod
+    def _parse(cls, rule_string):
+        if rule_string.startswith("#"):
+            rule_string = rule_string[1:]
+        format_type = "iupaclite"
+        glycan_definition = rule_string
+        if rule_string.startswith(":"):
+            match = re.search(r":([^:]+?):(.+)", rule_string, re.DOTALL)
+            if match:
+                metadata = match.group(1).split(",")
+                format_type = metadata[0]
+                metadata = dict([token.split("=") for token in metadata[1:]])
+                glycan_definition = match.group(2)
+            else:
+                raise ValueError("Cannot recognize glycan format %r" % (rule_string,))
+        return parse_glycan(format_type, glycan_definition), format_type, metadata
 
     @classmethod
     def try_parse(cls, rule_string):
         try:
-            glycosylation = cls.parser.search(rule_string)
-            glycosylation = FrozenGlycanComposition.parse(glycosylation.group(0))
-            return cls(glycosylation)
-        except Exception:
+            glycan, encoding_format, metadata = cls._parse(rule_string)
+            return cls(glycan, encoding_format, metadata)
+        except KeyboardInterrupt:
             return None
 
-    def __init__(self, glycan_composition):
-        if isinstance(glycan_composition, basestring):
-            glycan_composition = FrozenGlycanComposition.parse(glycan_composition)
+    def __init__(self, glycan, encoding_format=None, metadata=None):
+        if metadata is None:
+            metadata = {}
+        if isinstance(glycan, basestring):
+            if encoding_format is None:
+                glycan, encoding_format, _metadata = self._parse(glycan)
+                metadata.update(_metadata)
+            else:
+                glycan = parse_glycan(encoding_format, glycan)
+        else:
+            glycan = glycan.clone()
 
-        glycan_composition.composition_offset = Composition()
+        if isinstance(glycan, Glycan):
+            self._is_composition = False
+            if encoding_format is None:
+                encoding_format = "glycoct"
+        else:
+            self._is_composition = True
+            encoding_format = "iupaclite"
 
-        self.common_name = "@" + str(glycan_composition)
-        self.mass = glycan_composition.mass()
+        # Prepare information to encode the rule
+        self.encoding_format = encoding_format
+        self.metadata = metadata
+        self.glycan = glycan
+        try:
+            self.glycan.glycosylation_type = GlycosylationType[metadata['glycosylation_type']]
+        except KeyError:
+            pass
+        self._original = glycan.clone()
+        self.common_name = self._make_string()
+
+        # Only after the common name is set, prepare the patch
+        self._patch_dehydration()
+        self.mass = self.glycan.mass()
+        self.composition = self.glycan.total_composition()
+
+        self._simple_configuration()
+
+    def _simple_configuration(self):
         self.title = self.common_name
         self.preferred_name = self.common_name
+        self.unimod_name = self.common_name
         self.categories = [ModificationCategory.glycosylation]
         self.names = {self.common_name, self.title, self.preferred_name}
         self.aliases = set()
         self.options = {}
         self.fragile = True
 
+    def _make_string(self):
+        template = "#:{}:{}"
+        metadata = ",".join("%s=%s" % (k, v) for k, v in self.metadata.items())
+        if metadata:
+            metadata = "{},{}".format(self.encoding_format, metadata)
+        else:
+            metadata = self.encoding_format
+        return template.format(
+            metadata, self.glycan.serialize(self.encoding_format))
+
+    @property
+    def glycosylation_type(self):
+        return self.glycan.glycosylation_type
+
+    @property
+    def is_composition(self):
+        return self._is_composition
+
+    @property
+    def is_core(self):
+        return False
+
+    def _patch_dehydration(self):
+        if self.is_composition:
+            self.glycan.composition_offset = Composition()
+        else:
+            self.glycan.root.add_substituent(
+                Substituent("aglycone", composition=Composition()),
+                position=1, parent_loss=Composition("HO"))
+
     def losses(self):
         for i in []:
             yield i
 
     def clone(self):
-        return self.__class__(FrozenGlycanComposition.parse(self.name[1:]))
+        return self.__class__(
+            self._original, self.encoding_format, self.metadata)
+
+    def is_tracked_for(self, category):
+        return category == ModificationCategory.glycosylation
+
+    def get_fragments(self, *args, **kwargs):
+        if self.is_composition:
+            raise TypeError("Cannot generate fragments from composition")
+        for frag in self.glycan.fragments(*args, **kwargs):
+            yield frag
 
 
-class NGlycanCoreGlycosylation(Glycosylation):
+class CoreGlycosylation(Glycosylation):
+    @property
+    def is_composition(self):
+        return True
+
+    @property
+    def is_core(self):
+        return True
+
+    def get_fragments(self, *args, **kwargs):
+        return []
+
+    def _common_init(self):
+        self.names = {self.unimod_name, self.title, self.preferred_name, self.common_name}
+        self.options = {}
+        self.aliases = set()
+        self.categories = [ModificationCategory.glycosylation]
+
+    def clone(self):
+        return self.__class__()
+
+
+class NGlycanCoreGlycosylation(CoreGlycosylation):
     mass_ladder = {k: FrozenGlycanComposition.parse(k).total_composition() - Composition("H2O") for k in {
         "{HexNAc:1}",
         "{HexNAc:2}",
@@ -818,20 +1000,21 @@ class NGlycanCoreGlycosylation(Glycosylation):
         self.preferred_name = self.unimod_name
         self.targets = [(ModificationTarget("N"))]
         self.composition = _hexnac.total_composition().clone()
-        self.names = {self.unimod_name, self.title, self.preferred_name, self.common_name}
-        self.options = {}
-        self.aliases = set()
-        self.categories = [ModificationCategory.glycosylation]
+        self._common_init()
 
     def losses(self):
         for label_loss in self.mass_ladder.items():
             yield label_loss
 
+    @property
+    def glycosylation_type(self):
+        return GlycosylationType.n_linked
+
     def clone(self):
         return self.__class__(self.mass)
 
 
-class OGlycanCoreGlycosylation(Glycosylation):
+class OGlycanCoreGlycosylation(CoreGlycosylation):
     mass_ladder = {k: FrozenGlycanComposition.parse(k).total_composition() - Composition("H2O") for k in {
         "{HexNAc:1}",
         "{HexNAc:1; Hex:1}",
@@ -845,10 +1028,11 @@ class OGlycanCoreGlycosylation(Glycosylation):
         self.preferred_name = self.unimod_name
         self.targets = [ModificationTarget("S"), ModificationTarget("T")]
         self.composition = _hexnac.total_composition().clone()
-        self.names = {self.unimod_name, self.title, self.preferred_name, self.common_name}
-        self.options = {}
-        self.aliases = set()
-        self.categories = [ModificationCategory.glycosylation]
+        self._common_init()
+
+    @property
+    def glycosylation_type(self):
+        return GlycosylationType.o_linked
 
     def losses(self):
         for label_loss in self.mass_ladder.items():
@@ -858,7 +1042,7 @@ class OGlycanCoreGlycosylation(Glycosylation):
         return self.__class__(self.mass)
 
 
-class GlycosaminoglycanLinkerGlycosylation(Glycosylation):
+class GlycosaminoglycanLinkerGlycosylation(CoreGlycosylation):
     mass_ladder = {k: FrozenGlycanComposition.parse(k).total_composition() - Composition("H2O") for k in {
         "{Xyl:1}",
         "{Xyl:1; Hex:1}",
@@ -879,6 +1063,10 @@ class GlycosaminoglycanLinkerGlycosylation(Glycosylation):
         self.aliases = set()
         self.categories = [ModificationCategory.glycosylation]
 
+    @property
+    def glycosylation_type(self):
+        return GlycosylationType.glycosaminoglycan
+
     def losses(self):
         for label_loss in self.mass_ladder.items():
             yield label_loss
@@ -887,7 +1075,7 @@ class GlycosaminoglycanLinkerGlycosylation(Glycosylation):
         return self.__class__(self.mass)
 
 
-class OGlcNAcylation(Glycosylation):
+class OGlcNAcylation(CoreGlycosylation):
     mass_ladder = {
         "{GlcNAc:1}": _hexnac.total_composition()
     }
@@ -896,15 +1084,11 @@ class OGlcNAcylation(Glycosylation):
         self.common_name = "O-GlcNAc"
         self.preferred_name = self.common_name
         self.mass = base_mass
-        self.title = "O-GlcNAc"
-        self.unimod_name = "O-GlcNAc"
+        self.title = self.common_name
+        self.unimod_name = self.common_name
         self.targets = [ModificationTarget("S"), ModificationTarget("T")]
         self.composition = _hexnac.total_composition().clone()
-        self.title = self.common_name
-        self.names = {self.unimod_name, self.title, self.preferred_name, self.common_name}
-        self.categories = [ModificationCategory.glycosylation]
-        self.options = {}
-        self.aliases = set()
+        self._common_init()
 
     def losses(self):
         for label_loss in self.mass_ladder.items():
@@ -912,6 +1096,32 @@ class OGlcNAcylation(Glycosylation):
 
     def clone(self):
         return self.__class__(self.mass)
+
+
+class GlycanFragment(Glycosylation):
+    @property
+    def is_composition(self):
+        return True
+
+    @property
+    def is_core(self):
+        return False
+
+    def get_fragments(self, *args, **kwargs):
+        return []
+
+    def __init__(self, fragment):
+        self.common_name = fragment.name
+        self.mass = fragment.mass
+        self.title = fragment.name
+        self.unimod_name = fragment.name
+        self.preferred_name = self.unimod_name
+        self.targets = []
+        self.composition = fragment.composition
+        self.names = {self.unimod_name, self.title, self.preferred_name, self.common_name}
+        self.options = {}
+        self.aliases = set()
+        self.categories = [ModificationCategory.glycosylation]
 
 
 def load_from_csv(stream):
@@ -987,6 +1197,8 @@ class ModificationSource(object):
 class ModificationTable(ModificationSource):
 
     other_modifications = {
+        # "HexNAc": HexNAcylation(),
+        # "Xyl": Xylation(),
         "HexNAc": hexnac_modification,
         "Xyl": xylose_modification,
         "N-Glycosylation": NGlycanCoreGlycosylation(),
@@ -1022,6 +1234,8 @@ class ModificationTable(ModificationSource):
         for rule in rules:
             if not isinstance(rule, ModificationRule):
                 rule = ModificationRule(**rule)
+            if rule.name in self.other_modifications:
+                continue
             self.add(rule)
 
         self._include_other_rules()
@@ -1240,3 +1454,6 @@ class Modification(ModificationBase):
 
     def is_a(self, category):
         return self.rule.is_a(category)
+
+    def is_tracked_for(self, category):
+        return self.rule.is_tracked_for(category)

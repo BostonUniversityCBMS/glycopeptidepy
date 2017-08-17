@@ -1,9 +1,9 @@
+from collections import Mapping
+
 from glycopeptidepy.utils.collectiontools import decoratordict
 
 from glypy.utils import Enum
-from .modification import AnonymousModificationRule
 
-import glypy
 from glypy.structure.glycan import NamedGlycan
 from glypy import Composition
 from glypy.composition.glycan_composition import HashableGlycanComposition
@@ -44,21 +44,36 @@ glycosylation_site_detectors = decoratordict({
 
 class TypedGlycanComposition(HashableGlycanComposition):
 
-    def __init__(self, glycosylation_type, *args, **kwargs):
+    def __init__(self, glycosylation_type=None, *args, **kwargs):
         self.glycosylation_type = GlycosylationType[glycosylation_type]
-        super(TypedGlycanComposition).__init__(self, *args, **kwargs)
-
-    def as_modification(self):
-        return AnonymousModificationRule("Glycan[{0}]".format(';'.join(
-            self.serialize(),
-            self.mass,
-            self.glycosylation_type.name)))()
+        super(TypedGlycanComposition, self).__init__(*args, **kwargs)
 
     def is_type(self, glycosylation_type):
         return self.glycosylation_type is GlycosylationType[glycosylation_type]
 
 
-class GlycanCompositionProxy(object):
+class TypedGlycan(NamedGlycan):
+
+    def __init__(self, glycosylation_type=None, *args, **kwargs):
+        self.glycosylation_type = GlycosylationType[glycosylation_type]
+        super(TypedGlycan, self).__init__(*args, **kwargs)
+
+    def clone(self, index_method='dfs', cls=None):
+        if cls is None:
+            cls = TypedGlycan
+        inst = super(TypedGlycan, self).clone(index_method=index_method, cls=cls)
+        inst.glycosylation_type = self.glycosylation_type
+        return inst
+
+    def __repr__(self):
+        rep = super(TypedGlycan, self).__repr__()
+        return "%s\n%s" % (self.glycosylation_type, rep)
+
+    def is_type(self, glycosylation_type):
+        return self.glycosylation_type == GlycosylationType[glycosylation_type]
+
+
+class GlycanCompositionProxy(Mapping):
     def __init__(self, glycan_composition):
         self.obj = glycan_composition
 
@@ -83,6 +98,9 @@ class GlycanCompositionProxy(object):
     def items(self):
         return self.obj.items()
 
+    def clone(self, *args, **kwargs):
+        return self.obj.clone(*args, **kwargs)
+
     def __repr__(self):
         return repr(self.obj)
 
@@ -93,135 +111,141 @@ class GlycanCompositionProxy(object):
         return hash(self.obj)
 
     def __eq__(self, other):
+        try:
+            other = other.obj
+        except AttributeError:
+            pass
         return self.obj == other
 
     def __ne__(self, other):
-        return not (self.obj == other)
+        try:
+            other = other.obj
+        except AttributeError:
+            pass
+        return (self.obj != other)
+
+    def __add__(self, other):
+        return self.obj + other
+
+    def __sub__(self, other):
+        return self.obj - other
+
+    def __mul__(self, other):
+        return self.obj * other
+
+    def __len__(self):
+        return len(self.obj)
 
 
-class TypedGlycan(NamedGlycan):
+class GlycosylationManager(dict):
+    def __init__(self, parent, aggregate=None):
+        self.parent = parent
+        self._aggregate = None
+        self.aggregate = aggregate
+        self._proxy = None
 
-    def __init__(self, glycosylation_type=None, *args, **kwargs):
-        self.glycosylation_type = GlycosylationType[glycosylation_type]
-        super(TypedGlycan, self).__init__(*args, **kwargs)
+    def invalidate(self):
+        self._proxy = None
 
-    def clone(self, index_method='dfs', cls=None):
-        if cls is None:
-            cls = TypedGlycan
-        inst = super(TypedGlycan, self).clone(index_method=index_method, cls=cls)
-        inst.glycosylation_type = self.glycosylation_type
+    def clear(self):
+        self.invalidate()
+        self.aggregate = None
+        dict.clear(self)
+
+    def __setitem__(self, key, value):
+        self.invalidate()
+        dict.__setitem__(self, key, value)
+
+    def __delitem__(self, key):
+        self.invalidate()
+        dict.__delitem__(self, key)
+
+    def pop(self, key, default=None):
+        self.invalidate()
+        dict.pop(self, key, default)
+
+    def update(self, base):
+        self.invalidate()
+        dict.update(self, base)
+
+    setdefault = None
+    popitem = None
+
+    def copy(self):
+        inst = self.__class__(
+            self.parent,
+            self.aggregate.clone() if self.aggregate is not None else None)
+        inst.update(self)
         return inst
 
-    def __repr__(self):
-        rep = super(TypedGlycan, self).__repr__()
-        return "%s\n%s" % (self.glycosylation_type, rep)
-
-    def is_type(self, glycosylation_type):
-        return self.glycosylation_type == GlycosylationType[glycosylation_type]
-
-    def as_modification(self):
-        return AnonymousModificationRule("Glycan[{0}]".format(';'.join(self.name, self.mass)))()
-
-
-class GlycosylationSite(object):
-
-    attachment_loss = Composition("H2O")
-
-    def __init__(self, parent, position, glycosylation=None, site_types=None):
-        if site_types is None:
-            site_types = [GlycosylationType.n_linked]
-        self.parent = parent
-        self.position = position
-        self.glycosylation = glycosylation
-        self.site_types = [GlycosylationType[site_type] for site_type in site_types]
+    def clone(self):
+        return self.copy()
 
     @property
-    def mass(self):
-        if self.glycosylation is not None:
-            return self.glycosylation.mass() - self.attachment_loss.mass
-        else:
-            return 0
+    def aggregate(self):
+        return self._aggregate
 
-    def _set_glycosylation(self, glycan):
-        self._glycosylation = glycan
+    @aggregate.setter
+    def aggregate(self, value):
+        self._aggregate = value
+        if self._aggregate is not None:
+            self._patch_aggregate()
+        self.invalidate()
 
-    def _get_glycosylation(self):
-        return self._glycosylation
+    def _patch_aggregate(self):
+        offset = Composition({"H": 2, "O": 1})
+        self.aggregate.composition_offset -= offset
 
-    glycosylation = property(_get_glycosylation, _set_glycosylation)
-
-    def add_site_type(self, site_type):
-        self.site_types.append(site_type)
-
-    def total_composition(self):
-        if self._glycosylation is not None:
-            return self._glycosylation.total_composition() - self.attachment_loss
-        return Composition()
-
-    def __repr__(self):
-        rep = 'GlycosylationSite(%d, %s, %s)' % (self.position, self.glycosylation, ', '.join(
-            site_type.name for site_type in self.site_types))
-        return rep
-
-    def __eq__(self, other):
-        try:
-            return (self.position == other.position) and (self.glycosylation == other.glycosylation)
-        except:
-            return False
-
-    def __ne__(self, other):
-        try:
-            return (self.position != other.position) and (self.glycosylation != other.glycosylation)
-        except:
-            return True
-
-    def __hash__(self):
-        return hash(self.position)
-
-
-class MassableValueDict(dict):
     def total_composition(self):
         total = Composition()
+        has_aggregate = self.aggregate is not None
         for key, value in self.items():
-            total += value.total_composition()
+            if has_aggregate and value.rule.is_core:
+                continue
+            total += value.composition
+        if has_aggregate:
+            total += self.aggregate.total_composition()
         return total
 
     def mass(self):
         total = 0.
+        has_aggregate = self.aggregate is not None
         for key, value in self.items():
+            if has_aggregate and value.rule.is_core:
+                continue
             total += value.mass
+        if has_aggregate:
+            total += self.aggregate.mass()
         return total
 
-
-class GlycosylationManager(MassableValueDict):
-    def __init__(self, parent, *glycosites):
-        self.parent = parent
-        for glycosite in glycosites:
-            self[glycosite.position] = glycosite
-
-    def glycosylation_sites(self, glycosylation_type=None):
-        if glycosylation_type is None:
-            return list(self.keys())
+    def _make_glycan_composition_proxy(self):
+        if self.aggregate is not None:
+            base = self.aggregate.clone()
         else:
-            glycosylation_type = GlycosylationType[glycosylation_type]
-            results = []
-            for position, site in self.items():
-                if glycosylation_type in site.site_types:
-                    results.append(position)
-            return results
+            base = HashableGlycanComposition()
+            # Represent the initial amide bond between the peptide
+            # and the first glycan. Subsequent glycans do not need
+            # further chemical losses because of the dehyration built
+            # directly into the Residue abstraction.
+            base.composition_offset -= Composition({"H": 2, "O": 1})
+        for key, value in self.items():
+            if value.rule.is_core:
+                continue
+            elif value.rule.is_composition:
+                base += value.rule.glycan
+            else:
+                # Convert Glycan object into a composition, using the original
+                # detatched topology to omit the "aglycone" group which represents
+                # the connection between the glycan and the peptide, which penalizes
+                # the composition by H2O. This H2O is lost when that bond is formed,
+                # but doesn't need to be explicitly included as the loss is tracked
+                # when initializing the base above.
+                gc = HashableGlycanComposition.from_glycan(value.rule._original)
+                base += gc
+        return GlycanCompositionProxy(base)
 
-    def add_site(self, position, glycosylation=None, site_types=(GlycosylationType.n_linked,)):
-        site = GlycosylationSite(self.parent, position, glycosylation, site_types)
-        self[position] = site
-
-    @classmethod
-    def extract_sites(cls, peptide):
-        site_map = {}
-        for glycosylation_type, site_fn in glycosylation_site_detectors.items():
-            for site in site_fn(peptide):
-                if site in site_map:
-                    obj = site_map[site]
-                    obj.add_site_type(glycosylation_type)
-                else:
-                    site_map[site] = GlycosylationSite(peptide, site, site_types=[glycosylation_type])
-        return cls(peptide, *site_map.values())
+    @property
+    def glycan_composition(self):
+        if self._proxy is None:
+            self._proxy = self._make_glycan_composition_proxy()
+        return self._proxy

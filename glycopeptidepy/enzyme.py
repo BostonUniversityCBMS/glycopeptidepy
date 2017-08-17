@@ -49,25 +49,54 @@ class Protease(object):
             sequence = str(sequence)
         return len(self.regex.findall(sequence))
 
+    def _find_sites(self, sequence):
+        return itertools.chain(
+            map(lambda x: x.end(), self.regex.finditer(sequence)), [None])
+
     def cleave(self, sequence, missed_cleavages=0, min_length=0):
         peptides = []
         if isinstance(sequence, PeptideSequence):
             sequence = str(sequence)
+        # Keep track of the previous indices a cut was made at, with
+        # the start of the sequence (index 0) being treated as a possible
+        # site. This will be used to backtrack and produce missed cleavages.
+        #
+        # The maxlen argument to deque is important, as when this value is
+        # not None, the deque object automatically regulates its length. As
+        # items are added to the end in excess of maxlen, the same number of
+        # items are removed from the start of the container. This implicitly
+        # enforces the missed cleavage count requirement. The +2 ensures room
+        # will be available for at least one previous site to look up from,
+        # and the current site being added during each step of the loop below.
         cleavage_sites = deque([0], maxlen=missed_cleavages + 2)
-        for i in itertools.chain(map(lambda x: x.end(), self.regex.finditer(sequence)), [None]):
+        for i in self._find_sites(sequence):
+            # Add the new site to the backtrack list
             cleavage_sites.append(i)
+            # Step back through previous cleavage sites before
+            # this one
             for j in range(len(cleavage_sites) - 1):
+                # Get the sequence between the the jth previous site
+                # and the most recent cleavage site
                 seq = sequence[cleavage_sites[j]:cleavage_sites[-1]]
+                # Only deal with this if the sequence is non-empty
                 if seq:
                     if min_length is None or sequence_length(seq) >= min_length:
-                        peptides.append((seq, cleavage_sites[j], cleavage_sites[-1] if cleavage_sites[-1]
-                                         is not None else sequence_length(sequence)))
+
+                        # Get parent sequence coordinates
+                        start_position = cleavage_sites[j]
+                        end_position = cleavage_sites[-1]
+                        if end_position is None:
+                            end_position = sequence_length(sequence)
+                        # Store the sequence, start position, end position, and # of missed cleavages
+                        peptides.append((seq, start_position, end_position, missed_cleavages - j))
+        # Deduplicate and sort by starting postion
         return sorted(set(peptides), key=_get1)
 
     @classmethod
     def combine(cls, *names):
-        patterns = merge_enzyme_rules(names)
-        name = ' + '.join(names)
+        members = [Protease(name) if not isinstance(name, Protease) else name for name in names]
+        patterns = merge_enzyme_rules([member.regex.pattern for member in members])
+        name = ' + '.join([member.name for member in members])
         instance = cls(patterns)
         instance.name = name
         return instance
@@ -109,8 +138,8 @@ expasy_rules = {'arg-c': 'R',
                 'trypsin': '([KR](?=[^P]))|((?<=W)K(?=P))|((?<=M)R(?=P))'}
 
 
-def merge_enzyme_rules(enzyme_names):
-    rules = ["(" + expasy_rules[name] + ")" for name in enzyme_names]
+def merge_enzyme_rules(enzyme_patterns):
+    rules = ["(" + pattern + ")" for pattern in enzyme_patterns]
     return "|".join(rules)
 
 
@@ -121,3 +150,7 @@ def get_enzyme(name):
     except KeyError:
         warnings.warn("Could not identify protease {}".format(name))
         return Protease(name=name)
+
+
+trypsin = Protease("trypsin")
+gluc = Protease("glutamyl endopeptidase")
